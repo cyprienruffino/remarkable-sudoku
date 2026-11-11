@@ -47,3 +47,12 @@ cmake -B build-rm -G Ninja -DCMAKE_TOOLCHAIN_FILE=$RM_TOOLCHAIN_FILE && cmake --
 cmake --install build-rm --prefix dist/sudoku
 rm-deploy dist/sudoku
 ```
+
+## Thanks
+
+The handwriting recognition comes from sandsmark's
+[reCrossable](https://github.com/sandsmark/recrossable), which recognizes
+letters with a small [dlib](http://dlib.net/) network: Sudoku uses the same
+approach and network architecture, trained on digits instead. The digits come
+from the [MNIST database](https://en.wikipedia.org/wiki/MNIST_database) by Yann
+LeCun, Corinna Cortes and Christopher Burges.
