@@ -1,7 +1,8 @@
 # Sudoku
 
 Sudoku for the reMarkable Paper Pro family, as an [AppLoad](https://github.com/asivery/rm-appload) app.
-Tap a square, then a number, with the pen or a finger.
+Write a number in a square with the pen, or tap a square then a number on
+the keypad. Scribble over a square, or rub it with the pen's eraser, to clear it.
 
 - Three levels, all with a unique solution:
   - Easy: 36 givens, solvable by filling squares that have a single possible number
@@ -11,8 +12,22 @@ Tap a square, then a number, with the pen or a finger.
 - The game in progress is saved in `~/.local/share/sudoku/game` and resumed
   when the app opens again.
 
-The backend (`backend/`) generates puzzles and saves the game. The frontend
-(`ui/main.qml`) is loaded by AppLoad inside xochitl.
+The backend (`backend/`) generates puzzles, recognizes handwritten digits and
+saves the game. The frontend (`ui/main.qml`) is loaded by AppLoad inside xochitl.
+
+## Handwriting
+
+Digits are recognized by a small [dlib](http://dlib.net/) network in
+`data/digits.dat` (the one reCrossable uses for letters, with 9 outputs),
+trained on MNIST's 1 to 9. Pen strokes and MNIST images go through the same
+normalization (`backend/digits.h`). To retrain, download and gunzip
+[MNIST](https://storage.googleapis.com/cvdf-datasets/mnist/)'s four files into
+a directory, then:
+
+```sh
+build-pc/train_digits <mnist directory> data/digits.dat
+build-pc/test_digits data/digits.dat   # synthetic pen strokes
+```
 
 ## Building
 

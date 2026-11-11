@@ -11,6 +11,9 @@ Rectangle {
     readonly property int msgSave: 2
     readonly property int msgReady: 100
     readonly property int msgGame: 101
+    readonly property int msgRecognize: 3
+    readonly property int msgRecognized: 102
+    readonly property int msgEraser: 103
 
     property string level: "Easy"   // level of the next new game
     property var givens: []         // 81 digits, 0 for empty
@@ -19,6 +22,7 @@ Rectangle {
     property int selected: -1
     property bool checking: false
     property bool generating: true
+    property bool erasing: false    // the eraser end of the pen is near the screen
 
     readonly property bool hasGame: givens.length === 81
     readonly property bool solved: hasGame && givens.every((given, cell) => (given || entries[cell]) === solution[cell])
@@ -60,14 +64,18 @@ Rectangle {
         return count
     }
 
-    function enter(digit) {
-        if (selected < 0 || givens[selected] || solved) {
+    function setEntry(cell, digit) {
+        if (cell < 0 || givens[cell] || solved || entries[cell] === digit) {
             return
         }
         const updated = entries.slice()
-        updated[selected] = digit
+        updated[cell] = digit
         entries = updated
         backend.sendMessage(msgSave, entries.join(""))
+    }
+
+    function enter(digit) {
+        setEntry(selected, digit)
     }
 
     function newGame() {
@@ -96,7 +104,23 @@ Rectangle {
                 root.newGame()
                 break
             case root.msgGame:
+                ink.reset()
                 root.loadGame(contents)
+                break
+            case root.msgRecognized: {
+                const space = contents.indexOf(" ")
+                const cell = parseInt(contents.substring(0, space))
+                const digit = contents.substring(space + 1)
+                ink.clearCell(cell)
+                if (digit === "!") {
+                    root.setEntry(cell, 0)
+                } else if (digit !== "") {
+                    root.setEntry(cell, parseInt(digit))
+                }
+                break
+            }
+            case root.msgEraser:
+                root.erasing = contents === "1"
                 break
             }
         }
@@ -213,6 +237,168 @@ Rectangle {
             }
         }
 
+        // Handwriting: pen strokes write a digit in the cell they start in.
+        // xochitl delivers the pen as plain mouse events and touches as
+        // synthesized ones, which fall through to the cells' TapHandlers.
+        Canvas {
+            id: ink
+            anchors.fill: parent
+
+            property var strokes: ({})    // cell -> list of strokes, in cell-local coordinates
+            property var current: null    // { cell, points } or { erasing, lastErased }
+            property var pendingSegments: []
+            property bool pendingClear: false
+
+            function reset() {
+                strokes = {}
+                current = null
+                pendingSegments = []
+                pendingClear = true
+                recognizeTimer.stop()
+                requestPaint()
+            }
+
+            function cellAt(x, y) {
+                const column = Math.floor(x / board.cellSize)
+                const row = Math.floor(y / board.cellSize)
+                return column < 0 || row < 0 || column > 8 || row > 8 ? -1 : row * 9 + column
+            }
+
+            function clearCell(cell) {
+                delete strokes[cell]
+                const x = (cell % 9) * board.cellSize
+                const y = Math.floor(cell / 9) * board.cellSize
+                pendingSegments.push({ clear: true, x: x, y: y })
+                markDirty(Qt.rect(x, y, board.cellSize, board.cellSize))
+            }
+
+            function erase(x, y) {
+                const cell = cellAt(x, y)
+                if (cell < 0 || cell === current.lastErased) {
+                    return
+                }
+                current.lastErased = cell
+                if (recognizeTimer.cell === cell) {
+                    recognizeTimer.stop()
+                }
+                clearCell(cell)
+                root.setEntry(cell, 0)
+            }
+
+            function begin(x, y) {
+                if (root.erasing) {
+                    current = { erasing: true, lastErased: -1 }
+                    erase(x, y)
+                    return
+                }
+                const cell = cellAt(x, y)
+                if (cell < 0) {
+                    current = null
+                    return
+                }
+                // Moving to another cell: recognize the previous one right away
+                if (recognizeTimer.running && recognizeTimer.cell !== cell) {
+                    recognizeTimer.stop()
+                    recognize(recognizeTimer.cell)
+                }
+                recognizeTimer.stop()
+                root.selected = cell
+                current = root.givens[cell] ? null : { cell: cell, points: [Qt.point(x, y)] }
+            }
+
+            function extend(x, y) {
+                if (current === null) {
+                    return
+                }
+                if (current.erasing) {
+                    erase(x, y)
+                    return
+                }
+                // Keep the ink inside the cell it started in
+                const left = (current.cell % 9) * board.cellSize
+                const top = Math.floor(current.cell / 9) * board.cellSize
+                x = Math.max(left, Math.min(left + board.cellSize - 1, x))
+                y = Math.max(top, Math.min(top + board.cellSize - 1, y))
+
+                const last = current.points[current.points.length - 1]
+                current.points.push(Qt.point(x, y))
+                pendingSegments.push({ from: last, to: Qt.point(x, y) })
+                markDirty(Qt.rect(Math.min(last.x, x) - 4, Math.min(last.y, y) - 4,
+                                  Math.abs(last.x - x) + 8, Math.abs(last.y - y) + 8))
+            }
+
+            function end() {
+                if (current === null || current.erasing) {
+                    current = null
+                    return
+                }
+                const cell = current.cell
+                const left = (cell % 9) * board.cellSize
+                const top = Math.floor(cell / 9) * board.cellSize
+                if (!strokes[cell]) {
+                    strokes[cell] = []
+                }
+                strokes[cell].push(current.points.map(p => Qt.point(p.x - left, p.y - top)))
+                current = null
+                recognizeTimer.cell = cell
+                recognizeTimer.restart()
+            }
+
+            function recognize(cell) {
+                const cellStrokes = strokes[cell]
+                if (!cellStrokes) {
+                    return
+                }
+                const encoded = cellStrokes.map(stroke => stroke.map(p => Math.round(p.x) + "," + Math.round(p.y)).join(" "))
+                backend.sendMessage(root.msgRecognize, cell + " " + Math.round(board.cellSize) + ";" + encoded.join(";"))
+            }
+
+            onPaint: {
+                const ctx = getContext("2d")
+                if (pendingClear) {
+                    ctx.clearRect(0, 0, width, height)
+                    pendingClear = false
+                }
+                ctx.strokeStyle = "black"
+                ctx.lineWidth = 5
+                ctx.lineCap = "round"
+                for (const segment of pendingSegments) {
+                    if (segment.clear) {
+                        ctx.clearRect(segment.x, segment.y, board.cellSize, board.cellSize)
+                        continue
+                    }
+                    ctx.beginPath()
+                    ctx.moveTo(segment.from.x, segment.from.y)
+                    ctx.lineTo(segment.to.x, segment.to.y)
+                    ctx.stroke()
+                }
+                pendingSegments = []
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                preventStealing: true
+                onPressed: mouse => {
+                    if (mouse.source !== Qt.MouseEventNotSynthesized) {
+                        mouse.accepted = false
+                        return
+                    }
+                    ink.begin(mouse.x, mouse.y)
+                }
+                onPositionChanged: mouse => ink.extend(mouse.x, mouse.y)
+                onReleased: ink.end()
+                onCanceled: ink.end()
+            }
+
+            // Digits can take several strokes; wait for the pen to pause before recognizing
+            Timer {
+                id: recognizeTimer
+                property int cell: -1
+                interval: 600
+                onTriggered: ink.recognize(cell)
+            }
+        }
+
         // Box borders
         Repeater {
             model: 4
@@ -251,7 +437,7 @@ Rectangle {
         text: root.generating ? "Generating…"
             : root.solved ? "Solved!"
             : root.selected >= 0 && root.givens[root.selected] ? "That number is given"
-            : root.selected < 0 ? "Tap a square, then a number"
+            : root.selected < 0 ? "Write in a square, or tap it then a number"
             : ""
     }
 

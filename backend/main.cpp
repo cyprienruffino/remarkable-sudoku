@@ -2,21 +2,28 @@
 // progress saved, so it survives closing the app.
 
 #include "appload.h"
+#include "eraser.h"
+#include "recognizer.h"
 #include "sudoku.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <poll.h>
 #include <sstream>
 
 // Must match ui/main.qml
 constexpr int MSG_NEW_GAME = 1; // contents: easy, normal or hard
 constexpr int MSG_SAVE = 2;     // contents: the 81 entered digits, 0 for empty
+constexpr int MSG_RECOGNIZE = 3; // contents: "<cell> <cell size>;x,y x,y ...;x,y ...", one part per stroke
 constexpr int MSG_READY = 100;  // no game in progress
 constexpr int MSG_GAME = 101;   // contents: {"level", "givens", "solution", "entries"}
+constexpr int MSG_RECOGNIZED = 102; // contents: "<cell> <digit>", digit being "" if none and "!" to erase
+constexpr int MSG_ERASER = 103; // contents: "1" while the eraser end of the pen is near the screen
 
 namespace {
 
@@ -93,6 +100,42 @@ Game newGame(const std::string &levelName, sudoku::Level level, std::mt19937 &ra
     return { levelName, sudoku::toString(puzzle.givens), sudoku::toString(puzzle.solution), std::string(81, '0') };
 }
 
+std::string recognize(DigitRecognizer &recognizer, const std::string &contents)
+{
+    std::istringstream input(contents);
+    std::string head;
+    std::getline(input, head, ';');
+    int cell = -1;
+    int cellSize = 0;
+    std::istringstream(head) >> cell >> cellSize;
+
+    std::vector<Stroke> strokes;
+    std::string strokeText;
+    while (std::getline(input, strokeText, ';')) {
+        Stroke stroke;
+        std::istringstream points(strokeText);
+        Point point;
+        char comma;
+        while (points >> point.x >> comma >> point.y) {
+            stroke.push_back(point);
+        }
+        if (!stroke.empty()) {
+            strokes.push_back(stroke);
+        }
+    }
+
+    int digit = 0;
+    switch (recognizer.recognize(strokes, cellSize, &digit)) {
+    case DigitRecognizer::Result::Digit:
+        return std::to_string(cell) + ' ' + std::to_string(digit);
+    case DigitRecognizer::Result::Clear:
+        return std::to_string(cell) + " !";
+    case DigitRecognizer::Result::Empty:
+        break;
+    }
+    return std::to_string(cell) + ' ';
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -115,15 +158,38 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    DigitRecognizer recognizer;
+    recognizer.load("data/digits.dat");
+
     appload::Connection appload;
     if (!appload.connect(argv[1])) {
         perror("connect");
         return 1;
     }
 
+    EraserWatcher eraser;
+    eraser.open();
+
     std::optional<Game> game = load();
     appload::Message message;
-    while (appload.receive(&message)) {
+    while (true) {
+        pollfd fds[2] = { { appload.fd(), POLLIN, 0 }, { eraser.fd(), POLLIN, 0 } };
+        if (poll(fds, eraser.fd() == -1 ? 1 : 2, -1) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (eraser.fd() != -1 && (fds[1].revents & POLLIN) && eraser.readEvents()) {
+            appload.send(MSG_ERASER, eraser.isErasing() ? "1" : "0");
+        }
+        if (!(fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+            continue;
+        }
+        if (!appload.receive(&message)) {
+            break;
+        }
+
         switch (message.type) {
         case appload::MSG_TERMINATE:
             return 0;
@@ -133,6 +199,7 @@ int main(int argc, char *argv[])
             } else {
                 appload.send(MSG_READY, "ready");
             }
+            appload.send(MSG_ERASER, eraser.isErasing() ? "1" : "0");
             break;
         case MSG_NEW_GAME: {
             const auto level = parseLevel(message.contents);
@@ -145,6 +212,9 @@ int main(int argc, char *argv[])
             appload.send(MSG_GAME, game->toJson());
             break;
         }
+        case MSG_RECOGNIZE:
+            appload.send(MSG_RECOGNIZED, recognize(recognizer, message.contents));
+            break;
         case MSG_SAVE:
             if (game && isGrid(message.contents)) {
                 game->entries = message.contents;
