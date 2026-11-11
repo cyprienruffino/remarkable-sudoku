@@ -4,6 +4,8 @@ Sudoku for the reMarkable Paper Pro family, as an [AppLoad](https://github.com/a
 Write a number in a square with the pen, or tap a square then a number on
 the keypad. Scribble over a square, or rub it with the pen's eraser, to clear it.
 
+<img src="docs/screenshot.png" width="320" alt="Sudoku on a reMarkable Paper Pro Move, with a game in progress">
+
 - Three levels, all with a unique solution:
   - Easy: 36 givens, solvable by filling squares that have a single possible number
   - Normal: as few givens as possible, still solvable that way
